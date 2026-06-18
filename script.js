@@ -1,17 +1,14 @@
 /* ============================================================
    Armazém Tracker - Tribal Wars
-   v1.4.0
+   v1.5.0
    ------------------------------------------------------------
-   v1.4.0: volta pra $.get (confirmado funcionar via diagnóstico).
-   Extração de produção/hora via regex direto no HTML (sem
-   parsear o JSON inteiro, que quebrava por detalhe de formato).
-   wood_prod/stone_prod/iron_prod estão em unidades/segundo no
-   game_data; × 3600 = por hora. Também extrai nível do armazém
-   do bloco "buildings" do game_data.
+   v1.5.0: renomeia colunas ("Duração (hh:mm:ss)" e "Armazém cheio");
+   data inteligente (hoje/amanhã/data); ordenação clicável em
+   qualquer coluna.
    ------------------------------------------------------------
-   Lê todas as aldeias da conta e mostra:
-   aldeia | pontos | armazém (tamanho e nível) | tempo até encher | data/hora que enche
-
+   v1.4.0: volta pra $.get; extração de produção por regex direto
+   no HTML (wood_prod × 3600 = por hora).
+   ------------------------------------------------------------
    Uso (quick bar):
    javascript:$.getScript('https://boni-bruno.github.io/AtackPlanner/armazem.js');
    ============================================================ */
@@ -19,7 +16,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.4.0';
+    const VERSION = '1.5.0';
 
     if (typeof game_data === 'undefined') {
         alert('Armazém Tracker precisa ser executado dentro do Tribal Wars.');
@@ -42,15 +39,12 @@
         return location.pathname + '?village=' + id + '&screen=' + screen;
     }
 
-    // Extrai um campo numérico direto do HTML bruto, sem parsear JSON inteiro.
-    // Exemplo: extractFloat(html, 'wood_prod') → 1.2000000133361
     function extractFloat(html, field) {
         const re = new RegExp('"' + field + '"\\s*:\\s*([\\d.eE+-]+)');
         const m = html.match(re);
         return m ? parseFloat(m[1]) : 0;
     }
 
-    // Extrai o nível do armazém do bloco "buildings":{..."storage":"N"...}
     function extractStorageLevel(html) {
         const m = html.match(/"buildings"\s*:\s*\{[^}]*?"storage"\s*:\s*"?(\d+)"?/);
         return m ? parseInt(m[1], 10) : null;
@@ -66,7 +60,7 @@
         } catch (e) { return 0; }
     }
     const SERVER_OFFSET = getServerOffset();
-    function now() { return Date.now() + SERVER_OFFSET; }
+    function nowMs() { return Date.now() + SERVER_OFFSET; }
 
     function fmtDuration(totalSeconds) {
         if (!isFinite(totalSeconds)) return '—';
@@ -77,18 +71,29 @@
         return pad(h) + ':' + pad(m) + ':' + pad(s);
     }
 
-    function fmtDateTime(ms) {
+    function fmtFullAt(ms) {
         if (!isFinite(ms)) return '—';
         const d = new Date(ms);
-        return 'em ' + pad(d.getDate()) + '.' + pad(d.getMonth() + 1) +
-            '. às ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+        const timeStr = pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+
+        const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+        const tomorrowStart = new Date(todayStart); tomorrowStart.setDate(tomorrowStart.getDate() + 1);
+        const dayAfterStart = new Date(tomorrowStart); dayAfterStart.setDate(dayAfterStart.getDate() + 1);
+
+        if (ms >= todayStart.getTime() && ms < tomorrowStart.getTime()) {
+            return 'hoje às ' + timeStr;
+        } else if (ms >= tomorrowStart.getTime() && ms < dayAfterStart.getTime()) {
+            return 'amanhã às ' + timeStr;
+        } else {
+            return 'em ' + pad(d.getDate()) + '.' + pad(d.getMonth() + 1) + '. às ' + timeStr;
+        }
     }
 
     // ---------- UI ----------
 
-    const html = `
+    const uiHtml = `
     <div id="wh-tracker-overlay" style="position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:9999;display:flex;align-items:center;justify-content:center;font-family:Verdana,sans-serif;">
-      <div style="background:#e3d5b4;border:3px solid #7d510f;border-radius:6px;width:940px;max-height:85vh;display:flex;flex-direction:column;">
+      <div style="background:#e3d5b4;border:3px solid #7d510f;border-radius:6px;width:960px;max-height:85vh;display:flex;flex-direction:column;">
         <div style="background:#7d510f;color:#fff0d6;padding:8px 12px;display:flex;justify-content:space-between;align-items:center;border-radius:4px 4px 0 0;">
           <strong>Armazém Tracker v${VERSION}</strong>
           <span id="wh-close" style="cursor:pointer;font-weight:bold;padding:0 4px;">✕</span>
@@ -101,11 +106,11 @@
           <table width="100%" style="border-collapse:collapse;font-size:12px;">
             <thead>
               <tr style="background:#c8a45e;">
-                <th style="border:1px solid #7d510f;padding:4px;text-align:left;">Aldeia</th>
-                <th style="border:1px solid #7d510f;padding:4px;">Pontos</th>
-                <th style="border:1px solid #7d510f;padding:4px;">Armazém</th>
-                <th style="border:1px solid #7d510f;padding:4px;">Tempo até encher</th>
-                <th style="border:1px solid #7d510f;padding:4px;">Data/hora que enche</th>
+                <th data-col="name"     style="border:1px solid #7d510f;padding:4px;text-align:left;cursor:pointer;user-select:none;">Aldeia <span class="wh-arrow"></span></th>
+                <th data-col="points"   style="border:1px solid #7d510f;padding:4px;cursor:pointer;user-select:none;">Pontos <span class="wh-arrow"></span></th>
+                <th data-col="storage"  style="border:1px solid #7d510f;padding:4px;cursor:pointer;user-select:none;">Armazém <span class="wh-arrow"></span></th>
+                <th data-col="duration" style="border:1px solid #7d510f;padding:4px;cursor:pointer;user-select:none;">Duração (hh:mm:ss) <span class="wh-arrow"></span></th>
+                <th data-col="fullat"   style="border:1px solid #7d510f;padding:4px;cursor:pointer;user-select:none;">Armazém cheio <span class="wh-arrow"></span></th>
               </tr>
             </thead>
             <tbody id="wh-tbody"></tbody>
@@ -114,21 +119,68 @@
       </div>
     </div>`;
 
-    $('body').append(html);
+    $('body').append(uiHtml);
     $('#wh-close').on('click', () => $('#wh-tracker-overlay').remove());
+
+    // ---------- ordenação ----------
+
+    let sortCol = 'duration';
+    let sortDir = 1; // 1 = asc, -1 = desc
+    let cachedList = [];
+
+    function renderList() {
+        const sorted = [...cachedList].sort((a, b) => {
+            if (sortCol === 'name') return sortDir * a.name.localeCompare(b.name);
+            const vals = {
+                points:   [a.points,     b.points],
+                storage:  [a.storageMax, b.storageMax],
+                duration: [isFinite(a.timeSec) ? a.timeSec : Infinity, isFinite(b.timeSec) ? b.timeSec : Infinity],
+                fullat:   [a.fullAt || Infinity, b.fullAt || Infinity]
+            };
+            const [va, vb] = vals[sortCol] || [0, 0];
+            return sortDir * (va - vb);
+        });
+
+        // Setas nos cabeçalhos
+        $('#wh-tracker-overlay th').each(function () {
+            const arrow = $(this).find('.wh-arrow');
+            arrow.text($(this).data('col') === sortCol ? (sortDir === 1 ? ' ▲' : ' ▼') : '');
+        });
+
+        const $tbody = $('#wh-tbody');
+        $tbody.empty();
+        sorted.forEach(v => {
+            $tbody.append(`<tr>
+                <td style="border:1px solid #c8a45e;padding:4px;">
+                  <a href="${villageUrl(v.id, 'overview')}" style="color:#3a2a14;text-decoration:underline;">${v.name}</a>
+                </td>
+                <td style="border:1px solid #c8a45e;padding:4px;text-align:right;">${v.points.toLocaleString('pt-BR')}</td>
+                <td style="border:1px solid #c8a45e;padding:4px;text-align:right;">${v.storageMax.toLocaleString('pt-BR')} (Nível ${v.level ?? '?'})</td>
+                <td style="border:1px solid #c8a45e;padding:4px;text-align:right;">${fmtDuration(v.timeSec)}</td>
+                <td style="border:1px solid #c8a45e;padding:4px;">${fmtFullAt(v.fullAt)}</td>
+            </tr>`);
+        });
+    }
+
+    $('#wh-tracker-overlay thead th').on('click', function () {
+        const col = $(this).data('col');
+        if (sortCol === col) sortDir *= -1;
+        else { sortCol = col; sortDir = 1; }
+        renderList();
+    });
 
     // ---------- lógica principal ----------
 
     async function run() {
         const $status = $('#wh-status');
-        const $tbody = $('#wh-tbody');
-        $tbody.empty();
+        $('#wh-tbody').empty();
         $status.text('Lendo lista de aldeias...');
+        cachedList = [];
 
         const myId = game_data.village.id;
         const villages = {};
 
-        // 1) mode=prod → lista de aldeias, pontos, recursos atuais, capacidade do armazém
+        // 1) mode=prod → lista de aldeias
         const prodHtml = await $.get(villageUrl(myId, 'overview_villages') + '&mode=prod&group=0');
         const prodDoc = new DOMParser().parseFromString(prodHtml, 'text/html');
 
@@ -138,33 +190,30 @@
             if (!id) return;
             const name = $row.find('.quickedit-label').text().trim().replace(/\s+/g, ' ');
             const $tds = $row.find('td');
-            const points = parseNum($tds.eq(2).text());
-            const wood = parseNum($tds.eq(3).find('span.wood').text());
-            const stone = parseNum($tds.eq(3).find('span.stone').text());
-            const iron = parseNum($tds.eq(3).find('span.iron').text());
+            const points    = parseNum($tds.eq(2).text());
+            const wood      = parseNum($tds.eq(3).find('span.wood').text());
+            const stone     = parseNum($tds.eq(3).find('span.stone').text());
+            const iron      = parseNum($tds.eq(3).find('span.iron').text());
             const storageMax = parseNum($tds.eq(4).text());
             villages[id] = { id, name, points, wood, stone, iron, storageMax, level: null, rateWood: 0, rateStone: 0, rateIron: 0 };
         });
 
-        // 2) screen=overview de cada aldeia → extrai wood_prod/stone_prod/iron_prod por regex
+        // 2) screen=overview de cada aldeia → produção por regex
         const ids = Object.keys(villages);
         for (let i = 0; i < ids.length; i++) {
             const id = ids[i];
             $status.text('Lendo produção: aldeia ' + (i + 1) + ' de ' + ids.length + '...');
             try {
                 const pageHtml = await $.get(villageUrl(id, 'overview'));
-                // wood_prod está em unidades/segundo → × 3600 = por hora
                 villages[id].rateWood  = extractFloat(pageHtml, 'wood_prod')  * 3600;
                 villages[id].rateStone = extractFloat(pageHtml, 'stone_prod') * 3600;
                 villages[id].rateIron  = extractFloat(pageHtml, 'iron_prod')  * 3600;
-                // recursos mais atualizados (mesma requisição)
-                const w = extractFloat(pageHtml, 'wood');
-                const s = extractFloat(pageHtml, 'stone');
+                const w  = extractFloat(pageHtml, 'wood');
+                const s  = extractFloat(pageHtml, 'stone');
                 const fe = extractFloat(pageHtml, 'iron');
-                if (w) villages[id].wood = w;
-                if (s) villages[id].stone = s;
-                if (fe) villages[id].iron = fe;
-                // nível do armazém
+                if (w)  villages[id].wood  = w;
+                if (s)  villages[id].stone = s;
+                if (fe) villages[id].iron  = fe;
                 const lv = extractStorageLevel(pageHtml);
                 if (lv !== null) villages[id].level = lv;
             } catch (e) {
@@ -173,37 +222,24 @@
             await sleep(300);
         }
 
-        // 3) calcula tempo até encher (pelo recurso que enche primeiro)
-        const list = Object.values(villages).map(v => {
+        // 3) calcula tempos
+        const ms = nowMs();
+        cachedList = Object.values(villages).map(v => {
             const timeFor = (cur, rate) => rate > 0 ? Math.max(0, v.storageMax - cur) / rate * 3600 : Infinity;
             v.timeSec = Math.min(
                 timeFor(v.wood,  v.rateWood),
                 timeFor(v.stone, v.rateStone),
                 timeFor(v.iron,  v.rateIron)
             );
+            v.fullAt = isFinite(v.timeSec) ? ms + v.timeSec * 1000 : Infinity;
             return v;
         });
-        list.sort((a, b) => a.timeSec - b.timeSec);
 
-        // 4) renderiza
-        $tbody.empty();
-        const nowMs = now();
-        list.forEach(v => {
-            const fullAt = isFinite(v.timeSec) ? nowMs + v.timeSec * 1000 : Infinity;
-            $tbody.append(`<tr>
-                <td style="border:1px solid #c8a45e;padding:4px;">
-                  <a href="${villageUrl(v.id, 'overview')}" style="color:#3a2a14;text-decoration:underline;">${v.name}</a>
-                </td>
-                <td style="border:1px solid #c8a45e;padding:4px;text-align:right;">${v.points.toLocaleString('pt-BR')}</td>
-                <td style="border:1px solid #c8a45e;padding:4px;text-align:right;">${v.storageMax.toLocaleString('pt-BR')} (Nível ${v.level ?? '?'})</td>
-                <td style="border:1px solid #c8a45e;padding:4px;text-align:right;">${fmtDuration(v.timeSec)}</td>
-                <td style="border:1px solid #c8a45e;padding:4px;">${fmtDateTime(fullAt)}</td>
-            </tr>`);
-        });
+        renderList();
 
-        const n = new Date(nowMs);
+        const n = new Date(ms);
         $status.text('Atualizado às ' + pad(n.getHours()) + ':' + pad(n.getMinutes()) + ':' + pad(n.getSeconds()) +
-            ' — ' + list.length + ' aldeias.');
+            ' — ' + cachedList.length + ' aldeias.');
     }
 
     $('#wh-refresh').on('click', run);
