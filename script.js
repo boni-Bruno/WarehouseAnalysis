@@ -1,6 +1,19 @@
 /* ============================================================
    Armazém Tracker - Tribal Wars
-   v1.1.0
+   v1.2.0
+   ------------------------------------------------------------
+   v1.2.0: causa raiz real do "—" encontrada: data-title de
+   produção/hora é preenchido por JS do jogo no carregamento,
+   não vem no HTML puro que a gente busca. Agora lê direto do
+   bloco "var game_data = {...}" embutido em qualquer página do
+   jogo (estático, gerado pelo servidor) — produção (wood_prod
+   etc, assumido como por SEGUNDO, x3600 = por hora), recursos
+   atuais, capacidade e nível do armazém (buildings.storage).
+   Isso também elimina a busca por mode=buildings (e o bug do
+   "Nível ?" em aldeias recém-conquistadas).
+   ATENÇÃO: a conversão wood_prod -> por hora (x3600) é baseada
+   em como scripts de TW normalmente usam esse campo; vale
+   confirmar comparando com o tooltip real de uma aldeia.
    ------------------------------------------------------------
    v1.1.0: corrige produção sempre "—" (parse via DOMParser em vez
    de $.html(), que executava os <script> da página e quebrava);
@@ -10,11 +23,10 @@
    Lê todas as aldeias da conta e mostra:
    aldeia | pontos | armazém (tamanho e nível) | tempo até encher | data/hora que enche
 
-   Fontes de dados (lidas diretamente do jogo, sem suposições):
-   - screen=overview_villages&mode=prod      -> aldeia, pontos, recursos atuais, capacidade do armazém
-   - screen=overview_villages&mode=buildings -> nível do armazém (coluna b_storage)
-   - screen=overview (por aldeia)            -> produção/hora real de cada recurso (data-title do header),
-                                                  já incluindo todos os bônus (item de paladino, aldeia-bônus, etc.)
+   Fontes de dados (lidas diretamente do HTML estático do jogo, sem executar nenhum script):
+   - screen=overview_villages&mode=prod -> lista de aldeias, pontos, recursos atuais, capacidade do armazém
+   - "var game_data = {...}" embutido em cada página de aldeia (screen=overview) -> produção/h real
+     de cada recurso (já com todos os bônus aplicados), nível do armazém, recursos atualizados
 
    Uso (quick bar):
    javascript:$.getScript('https://boni-bruno.github.io/AtackPlanner/armazem.js');
@@ -23,7 +35,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.1.0';
+    const VERSION = '1.2.0';
 
     if (typeof game_data === 'undefined') {
         alert('Armazém Tracker precisa ser executado dentro do Tribal Wars.');
@@ -39,6 +51,30 @@
     // (jQuery $('<div>').html(x) executaria os scripts da página real e quebra tudo).
     function parseDoc(htmlString) {
         return new DOMParser().parseFromString(htmlString, 'text/html');
+    }
+
+    // Extrai o objeto "var game_data = {...};" embutido no HTML puro da página
+    // (estático, gerado pelo servidor — não depende de nenhum script rodar).
+    function extractGameData(htmlString) {
+        const marker = 'var game_data = ';
+        const idx = htmlString.indexOf(marker);
+        if (idx === -1) return null;
+        let i = idx + marker.length;
+        if (htmlString[i] !== '{') return null;
+        let depth = 0;
+        const start = i;
+        for (; i < htmlString.length; i++) {
+            if (htmlString[i] === '{') depth++;
+            else if (htmlString[i] === '}') {
+                depth--;
+                if (depth === 0) { i++; break; }
+            }
+        }
+        try {
+            return JSON.parse(htmlString.slice(start, i));
+        } catch (e) {
+            return null;
+        }
     }
 
     function pad(n) { return String(n).padStart(2, '0'); }
@@ -154,23 +190,8 @@
             };
         });
 
-        // 2) screen=overview_villages&mode=buildings -> nível do armazém
-        $status.text('Lendo níveis de armazém...');
-        const buildHtml = await $.get(villageUrl(myId, 'overview_villages') + '&mode=buildings&group=0');
-        const buildDoc = parseDoc(buildHtml);
-
-        $('#buildings_table tr[id^="v_"]', buildDoc).each(function () {
-            const $row = $(this);
-            let id = $row.find('.quickedit-vn').data('id');
-            if (!id) {
-                const m = /^v_(\d+)$/.exec(this.id);
-                if (m) id = m[1];
-            }
-            if (!id || !villages[id]) return;
-            villages[id].level = parseNum($row.find('td.upgrade_building.b_storage').text());
-        });
-
-        // 3) produção real por hora, aldeia por aldeia (com pequeno delay entre requisições)
+        // 2) produção real/h, nível do armazém e recursos atuais — direto do game_data
+        //    embutido em cada página de aldeia (estático, não depende de JS rodar)
         const ids = Object.keys(villages);
         for (let i = 0; i < ids.length; i++) {
             const id = ids[i];
@@ -178,21 +199,22 @@
 
             try {
                 const pageHtml = await $.get(villageUrl(id, 'overview'));
-                const doc = parseDoc(pageHtml);
+                const gd = extractGameData(pageHtml);
+                if (!gd || !gd.village) {
+                    console.error('Armazém Tracker: game_data não encontrado para aldeia', id);
+                } else {
+                    const v = gd.village;
+                    // wood_prod/stone_prod/iron_prod vêm em recurso-por-SEGUNDO -> x3600 = por hora
+                    villages[id].rateWood = (v.wood_prod || 0) * 3600;
+                    villages[id].rateStone = (v.stone_prod || 0) * 3600;
+                    villages[id].rateIron = (v.iron_prod || 0) * 3600;
 
-                const grab = title => {
-                    const m = String(title || '').replace(/\./g, '').match(/(\d+)\s*por hora/);
-                    return m ? parseInt(m[1], 10) : 0;
-                };
-
-                villages[id].rateWood = grab($('#wood', doc).attr('data-title'));
-                villages[id].rateStone = grab($('#stone', doc).attr('data-title'));
-                villages[id].rateIron = grab($('#iron', doc).attr('data-title'));
-
-                // recursos mais recentes (mesma leitura da produção, evita defasagem)
-                villages[id].wood = parseNum($('#wood', doc).text());
-                villages[id].stone = parseNum($('#stone', doc).text());
-                villages[id].iron = parseNum($('#iron', doc).text());
+                    villages[id].wood = v.wood ?? villages[id].wood;
+                    villages[id].stone = v.stone ?? villages[id].stone;
+                    villages[id].iron = v.iron ?? villages[id].iron;
+                    villages[id].storageMax = v.storage_max ?? villages[id].storageMax;
+                    villages[id].level = v.buildings ? parseNum(v.buildings.storage) : villages[id].level;
+                }
             } catch (e) {
                 console.error('Armazém Tracker: falha lendo aldeia', id, e);
             }
