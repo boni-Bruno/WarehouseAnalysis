@@ -1,32 +1,16 @@
 /* ============================================================
    Armazém Tracker - Tribal Wars
-   v1.3.0
+   v1.4.0
    ------------------------------------------------------------
-   v1.3.0: a leitura do "var game_data" no HTML puro não estava
-   batendo (provavelmente o nome/formato da variável é outro
-   nessa versão do jogo) e exigia adivinhar a conversão de
-   wood_prod pra "por hora". Trocado por leitura via <iframe>
-   escondida: carrega a aldeia de verdade (com JS rodando), e lê
-   o tooltip "X por hora" já calculado pelo próprio jogo (sem
-   fórmula nenhuma) e o nível do armazém do game_data REAL da
-   aldeia. Mais pesado (carrega a página de fato), mas exato.
-   ------------------------------------------------------------
-   v1.2.0: causa raiz real do "—" encontrada: data-title de
-   produção/hora é preenchido por JS do jogo no carregamento,
-   não vem no HTML puro que a gente busca.
-   ------------------------------------------------------------
-   v1.1.0: corrige produção sempre "—" (parse via DOMParser em vez
-   de $.html(), que executava os <script> da página e quebrava);
-   fallback de ID na tabela de edifícios; nome da aldeia agora é
-   link pra screen=overview; "Nível null" -> "Nível ?".
+   v1.4.0: volta pra $.get (confirmado funcionar via diagnóstico).
+   Extração de produção/hora via regex direto no HTML (sem
+   parsear o JSON inteiro, que quebrava por detalhe de formato).
+   wood_prod/stone_prod/iron_prod estão em unidades/segundo no
+   game_data; × 3600 = por hora. Também extrai nível do armazém
+   do bloco "buildings" do game_data.
    ------------------------------------------------------------
    Lê todas as aldeias da conta e mostra:
    aldeia | pontos | armazém (tamanho e nível) | tempo até encher | data/hora que enche
-
-   Fontes de dados:
-   - screen=overview_villages&mode=prod -> lista de aldeias, pontos, recursos atuais, capacidade do armazém
-   - iframe escondida carregando screen=overview de cada aldeia -> tooltip real "X por hora" (já com
-     todos os bônus aplicados) e nível do armazém, lidos depois que o JS da própria página roda
 
    Uso (quick bar):
    javascript:$.getScript('https://boni-bruno.github.io/AtackPlanner/armazem.js');
@@ -35,89 +19,16 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.3.0';
+    const VERSION = '1.4.0';
 
     if (typeof game_data === 'undefined') {
         alert('Armazém Tracker precisa ser executado dentro do Tribal Wars.');
         return;
     }
 
-    // Remove instância anterior, se houver (evita duplicar ao rodar de novo pela quick bar)
     $('#wh-tracker-overlay').remove();
 
     // ---------- helpers ----------
-
-    // Faz parse de uma página HTML sem executar nenhum <script> dela
-    // (jQuery $('<div>').html(x) executaria os scripts da página real e quebra tudo).
-    function parseDoc(htmlString) {
-        return new DOMParser().parseFromString(htmlString, 'text/html');
-    }
-
-    // Carrega a aldeia numa <iframe> escondida (o JS da página roda de verdade ali),
-    // e lê o tooltip "X por hora" já calculado pelo jogo + o nível do armazém do
-    // game_data real daquela aldeia. Sem fórmula, sem suposição.
-    function readVillageViaIframe(id) {
-        return new Promise(resolve => {
-            const iframe = document.createElement('iframe');
-            iframe.style.display = 'none';
-            iframe.setAttribute('allow', "autoplay 'none'");
-            let done = false;
-
-            const finish = result => {
-                if (done) return;
-                done = true;
-                iframe.remove();
-                resolve(result);
-            };
-
-            iframe.onload = () => {
-                // pequeno delay pra garantir que scripts deferidos (tooltip etc.) já rodaram
-                setTimeout(() => {
-                    try {
-                        const win = iframe.contentWindow;
-                        const doc = iframe.contentDocument;
-
-                        // evita qualquer áudio de fundo tocando dentro da iframe
-                        doc.querySelectorAll('audio, video').forEach(el => {
-                            try { el.pause(); el.muted = true; } catch (e) { /* ignore */ }
-                        });
-
-                        const grab = elId => {
-                            const el = doc.getElementById(elId);
-                            const t = el && el.getAttribute('data-title');
-                            const m = t && t.replace(/\./g, '').match(/(\d+)\s*por hora/);
-                            return m ? parseInt(m[1], 10) : 0;
-                        };
-                        const txt = elId => {
-                            const el = doc.getElementById(elId);
-                            return el ? parseNum(el.textContent) : null;
-                        };
-
-                        const gd = win.game_data;
-                        finish({
-                            rateWood: grab('wood'),
-                            rateStone: grab('stone'),
-                            rateIron: grab('iron'),
-                            wood: txt('wood'),
-                            stone: txt('stone'),
-                            iron: txt('iron'),
-                            storageMax: txt('storage'),
-                            level: gd && gd.village && gd.village.buildings ? parseNum(gd.village.buildings.storage) : null
-                        });
-                    } catch (e) {
-                        finish(null);
-                    }
-                }, 200);
-            };
-            iframe.onerror = () => finish(null);
-
-            document.body.appendChild(iframe);
-            iframe.src = villageUrl(id, 'overview');
-
-            // segurança: se nunca carregar, não trava o loop pra sempre
-            setTimeout(() => finish(null), 8000);
-        });
-    }
 
     function pad(n) { return String(n).padStart(2, '0'); }
 
@@ -125,25 +36,34 @@
         return parseInt(String(text).replace(/[^\d-]/g, ''), 10) || 0;
     }
 
-    function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+    function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
     function villageUrl(id, screen) {
         return location.pathname + '?village=' + id + '&screen=' + screen;
     }
 
-    // Offset entre hora do servidor (mostrada no rodapé do jogo) e hora do navegador,
-    // pra garantir que "data/hora que enche" seja calculada a partir do tempo certo.
+    // Extrai um campo numérico direto do HTML bruto, sem parsear JSON inteiro.
+    // Exemplo: extractFloat(html, 'wood_prod') → 1.2000000133361
+    function extractFloat(html, field) {
+        const re = new RegExp('"' + field + '"\\s*:\\s*([\\d.eE+-]+)');
+        const m = html.match(re);
+        return m ? parseFloat(m[1]) : 0;
+    }
+
+    // Extrai o nível do armazém do bloco "buildings":{..."storage":"N"...}
+    function extractStorageLevel(html) {
+        const m = html.match(/"buildings"\s*:\s*\{[^}]*?"storage"\s*:\s*"?(\d+)"?/);
+        return m ? parseInt(m[1], 10) : null;
+    }
+
     function getServerOffset() {
         try {
-            const t = $('#serverTime').text().trim();   // HH:MM:SS
-            const d = $('#serverDate').text().trim();    // DD/MM/AAAA
+            const t = $('#serverTime').text().trim();
+            const d = $('#serverDate').text().trim();
             const [hh, mm, ss] = t.split(':').map(Number);
             const [dd, mo, yy] = d.split('/').map(Number);
-            const serverNow = new Date(yy, mo - 1, dd, hh, mm, ss).getTime();
-            return serverNow - Date.now();
-        } catch (e) {
-            return 0;
-        }
+            return new Date(yy, mo - 1, dd, hh, mm, ss).getTime() - Date.now();
+        } catch (e) { return 0; }
     }
     const SERVER_OFFSET = getServerOffset();
     function now() { return Date.now() + SERVER_OFFSET; }
@@ -159,9 +79,9 @@
 
     function fmtDateTime(ms) {
         if (!isFinite(ms)) return '—';
-        const date = new Date(ms);
-        return 'em ' + pad(date.getDate()) + '.' + pad(date.getMonth() + 1) +
-            '. às ' + pad(date.getHours()) + ':' + pad(date.getMinutes()) + ':' + pad(date.getSeconds());
+        const d = new Date(ms);
+        return 'em ' + pad(d.getDate()) + '.' + pad(d.getMonth() + 1) +
+            '. às ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
     }
 
     // ---------- UI ----------
@@ -208,72 +128,72 @@
         const myId = game_data.village.id;
         const villages = {};
 
-        // 1) screen=overview_villages&mode=prod -> aldeia, pontos, recursos, capacidade do armazém
+        // 1) mode=prod → lista de aldeias, pontos, recursos atuais, capacidade do armazém
         const prodHtml = await $.get(villageUrl(myId, 'overview_villages') + '&mode=prod&group=0');
-        const prodDoc = parseDoc(prodHtml);
+        const prodDoc = new DOMParser().parseFromString(prodHtml, 'text/html');
 
-        $('#production_table > tbody > tr', prodDoc).each(function () {
-            const $row = $(this);
+        prodDoc.querySelectorAll('#production_table > tbody > tr').forEach(row => {
+            const $row = $(row);
             const id = $row.find('.quickedit-vn').data('id');
             if (!id) return;
-
             const name = $row.find('.quickedit-label').text().trim().replace(/\s+/g, ' ');
             const $tds = $row.find('td');
             const points = parseNum($tds.eq(2).text());
-            const resCell = $tds.eq(3);
-            const wood = parseNum(resCell.find('span.wood').text());
-            const stone = parseNum(resCell.find('span.stone').text());
-            const iron = parseNum(resCell.find('span.iron').text());
+            const wood = parseNum($tds.eq(3).find('span.wood').text());
+            const stone = parseNum($tds.eq(3).find('span.stone').text());
+            const iron = parseNum($tds.eq(3).find('span.iron').text());
             const storageMax = parseNum($tds.eq(4).text());
-
-            villages[id] = {
-                id, name, points, wood, stone, iron, storageMax,
-                level: null, rateWood: 0, rateStone: 0, rateIron: 0
-            };
+            villages[id] = { id, name, points, wood, stone, iron, storageMax, level: null, rateWood: 0, rateStone: 0, rateIron: 0 };
         });
 
-        // 2) produção real/h (tooltip exato do jogo) e nível do armazém — via iframe escondida
+        // 2) screen=overview de cada aldeia → extrai wood_prod/stone_prod/iron_prod por regex
         const ids = Object.keys(villages);
         for (let i = 0; i < ids.length; i++) {
             const id = ids[i];
             $status.text('Lendo produção: aldeia ' + (i + 1) + ' de ' + ids.length + '...');
-
-            const result = await readVillageViaIframe(id);
-            if (result) {
-                Object.keys(result).forEach(k => {
-                    if (result[k] !== null && result[k] !== undefined) villages[id][k] = result[k];
-                });
-            } else {
-                console.error('Armazém Tracker: falha lendo aldeia (iframe)', id);
+            try {
+                const pageHtml = await $.get(villageUrl(id, 'overview'));
+                // wood_prod está em unidades/segundo → × 3600 = por hora
+                villages[id].rateWood  = extractFloat(pageHtml, 'wood_prod')  * 3600;
+                villages[id].rateStone = extractFloat(pageHtml, 'stone_prod') * 3600;
+                villages[id].rateIron  = extractFloat(pageHtml, 'iron_prod')  * 3600;
+                // recursos mais atualizados (mesma requisição)
+                const w = extractFloat(pageHtml, 'wood');
+                const s = extractFloat(pageHtml, 'stone');
+                const fe = extractFloat(pageHtml, 'iron');
+                if (w) villages[id].wood = w;
+                if (s) villages[id].stone = s;
+                if (fe) villages[id].iron = fe;
+                // nível do armazém
+                const lv = extractStorageLevel(pageHtml);
+                if (lv !== null) villages[id].level = lv;
+            } catch (e) {
+                console.error('Armazém Tracker: falha lendo aldeia', id, e);
             }
-
-            await sleep(250);
+            await sleep(300);
         }
 
-        // 4) calcula tempo até encher (pelo recurso que enche primeiro)
+        // 3) calcula tempo até encher (pelo recurso que enche primeiro)
         const list = Object.values(villages).map(v => {
-            const timeFor = (cur, rate) => {
-                if (rate <= 0) return Infinity;
-                const remaining = Math.max(0, v.storageMax - cur);
-                return remaining / rate * 3600;
-            };
+            const timeFor = (cur, rate) => rate > 0 ? Math.max(0, v.storageMax - cur) / rate * 3600 : Infinity;
             v.timeSec = Math.min(
-                timeFor(v.wood, v.rateWood),
+                timeFor(v.wood,  v.rateWood),
                 timeFor(v.stone, v.rateStone),
-                timeFor(v.iron, v.rateIron)
+                timeFor(v.iron,  v.rateIron)
             );
             return v;
         });
-
         list.sort((a, b) => a.timeSec - b.timeSec);
 
-        // 5) renderiza
+        // 4) renderiza
         $tbody.empty();
         const nowMs = now();
         list.forEach(v => {
             const fullAt = isFinite(v.timeSec) ? nowMs + v.timeSec * 1000 : Infinity;
             $tbody.append(`<tr>
-                <td style="border:1px solid #c8a45e;padding:4px;"><a href="${villageUrl(v.id, 'overview')}" style="color:#3a2a14;text-decoration:underline;">${v.name}</a></td>
+                <td style="border:1px solid #c8a45e;padding:4px;">
+                  <a href="${villageUrl(v.id, 'overview')}" style="color:#3a2a14;text-decoration:underline;">${v.name}</a>
+                </td>
                 <td style="border:1px solid #c8a45e;padding:4px;text-align:right;">${v.points.toLocaleString('pt-BR')}</td>
                 <td style="border:1px solid #c8a45e;padding:4px;text-align:right;">${v.storageMax.toLocaleString('pt-BR')} (Nível ${v.level ?? '?'})</td>
                 <td style="border:1px solid #c8a45e;padding:4px;text-align:right;">${fmtDuration(v.timeSec)}</td>
