@@ -1,6 +1,11 @@
 /* ============================================================
    Armazém Tracker - Tribal Wars
-   v1.0.0
+   v1.1.0
+   ------------------------------------------------------------
+   v1.1.0: corrige produção sempre "—" (parse via DOMParser em vez
+   de $.html(), que executava os <script> da página e quebrava);
+   fallback de ID na tabela de edifícios; nome da aldeia agora é
+   link pra screen=overview; "Nível null" -> "Nível ?".
    ------------------------------------------------------------
    Lê todas as aldeias da conta e mostra:
    aldeia | pontos | armazém (tamanho e nível) | tempo até encher | data/hora que enche
@@ -18,7 +23,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.0.0';
+    const VERSION = '1.1.0';
 
     if (typeof game_data === 'undefined') {
         alert('Armazém Tracker precisa ser executado dentro do Tribal Wars.');
@@ -29,6 +34,12 @@
     $('#wh-tracker-overlay').remove();
 
     // ---------- helpers ----------
+
+    // Faz parse de uma página HTML sem executar nenhum <script> dela
+    // (jQuery $('<div>').html(x) executaria os scripts da página real e quebra tudo).
+    function parseDoc(htmlString) {
+        return new DOMParser().parseFromString(htmlString, 'text/html');
+    }
 
     function pad(n) { return String(n).padStart(2, '0'); }
 
@@ -121,9 +132,9 @@
 
         // 1) screen=overview_villages&mode=prod -> aldeia, pontos, recursos, capacidade do armazém
         const prodHtml = await $.get(villageUrl(myId, 'overview_villages') + '&mode=prod&group=0');
-        const $prod = $('<div>').html(prodHtml);
+        const prodDoc = parseDoc(prodHtml);
 
-        $prod.find('#production_table > tbody > tr').each(function () {
+        $('#production_table > tbody > tr', prodDoc).each(function () {
             const $row = $(this);
             const id = $row.find('.quickedit-vn').data('id');
             if (!id) return;
@@ -146,11 +157,15 @@
         // 2) screen=overview_villages&mode=buildings -> nível do armazém
         $status.text('Lendo níveis de armazém...');
         const buildHtml = await $.get(villageUrl(myId, 'overview_villages') + '&mode=buildings&group=0');
-        const $build = $('<div>').html(buildHtml);
+        const buildDoc = parseDoc(buildHtml);
 
-        $build.find('#buildings_table tr[id^="v_"]').each(function () {
+        $('#buildings_table tr[id^="v_"]', buildDoc).each(function () {
             const $row = $(this);
-            const id = $row.find('.quickedit-vn').data('id');
+            let id = $row.find('.quickedit-vn').data('id');
+            if (!id) {
+                const m = /^v_(\d+)$/.exec(this.id);
+                if (m) id = m[1];
+            }
             if (!id || !villages[id]) return;
             villages[id].level = parseNum($row.find('td.upgrade_building.b_storage').text());
         });
@@ -163,23 +178,23 @@
 
             try {
                 const pageHtml = await $.get(villageUrl(id, 'overview'));
-                const $doc = $('<div>').html(pageHtml);
+                const doc = parseDoc(pageHtml);
 
                 const grab = title => {
                     const m = String(title || '').replace(/\./g, '').match(/(\d+)\s*por hora/);
                     return m ? parseInt(m[1], 10) : 0;
                 };
 
-                villages[id].rateWood = grab($doc.find('#wood').attr('data-title'));
-                villages[id].rateStone = grab($doc.find('#stone').attr('data-title'));
-                villages[id].rateIron = grab($doc.find('#iron').attr('data-title'));
+                villages[id].rateWood = grab($('#wood', doc).attr('data-title'));
+                villages[id].rateStone = grab($('#stone', doc).attr('data-title'));
+                villages[id].rateIron = grab($('#iron', doc).attr('data-title'));
 
                 // recursos mais recentes (mesma leitura da produção, evita defasagem)
-                villages[id].wood = parseNum($doc.find('#wood').text());
-                villages[id].stone = parseNum($doc.find('#stone').text());
-                villages[id].iron = parseNum($doc.find('#iron').text());
+                villages[id].wood = parseNum($('#wood', doc).text());
+                villages[id].stone = parseNum($('#stone', doc).text());
+                villages[id].iron = parseNum($('#iron', doc).text());
             } catch (e) {
-                // se uma aldeia falhar, segue pras outras (essa fica sem tempo calculado)
+                console.error('Armazém Tracker: falha lendo aldeia', id, e);
             }
 
             await sleep(300);
@@ -208,9 +223,9 @@
         list.forEach(v => {
             const fullAt = isFinite(v.timeSec) ? nowMs + v.timeSec * 1000 : Infinity;
             $tbody.append(`<tr>
-                <td style="border:1px solid #c8a45e;padding:4px;">${v.name}</td>
+                <td style="border:1px solid #c8a45e;padding:4px;"><a href="${villageUrl(v.id, 'overview')}" style="color:#3a2a14;text-decoration:underline;">${v.name}</a></td>
                 <td style="border:1px solid #c8a45e;padding:4px;text-align:right;">${v.points.toLocaleString('pt-BR')}</td>
-                <td style="border:1px solid #c8a45e;padding:4px;text-align:right;">${v.storageMax.toLocaleString('pt-BR')} (Nível ${v.level})</td>
+                <td style="border:1px solid #c8a45e;padding:4px;text-align:right;">${v.storageMax.toLocaleString('pt-BR')} (Nível ${v.level ?? '?'})</td>
                 <td style="border:1px solid #c8a45e;padding:4px;text-align:right;">${fmtDuration(v.timeSec)}</td>
                 <td style="border:1px solid #c8a45e;padding:4px;">${fmtDateTime(fullAt)}</td>
             </tr>`);
